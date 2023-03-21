@@ -18,6 +18,14 @@ x-deploy: &default-deploy
 version: '3.7'
 
 services:
+  mock-service:
+    image: "nginx:1.23.3-alpine"
+    restart: always
+    environment:
+    - NGINX_PORT=80
+    ports:
+    - 8080:80
+
   caddy:
     image: caddy:2
     volumes:
