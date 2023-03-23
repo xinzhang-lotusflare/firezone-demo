@@ -1,5 +1,4 @@
-# Example compose file for a running a local Firezone instance on
-# macOS or Windows.
+# Example compose file for production deployment on Linux.
 #
 # Note: This file is meant to serve as a template. Please modify it
 # according to your needs. Read more about Docker Compose:
@@ -18,37 +17,88 @@ x-deploy: &default-deploy
 version: '3.7'
 
 services:
-  mock-service:
-    image: "nginx:1.23.3-alpine"
-    restart: always
+  # mock-service:
+  #   image: "nginx:1.23.3-alpine"
+  #   restart: always
+  #   environment:
+  #   - NGINX_PORT=8080
+  #   ports:
+  #   - 10086:8080
+  
+  keycloak-db:
+    image: postgres:15.2-alpine3.17
     environment:
-    - NGINX_PORT=80
-    ports:
-    - 8080:80
-
-  caddy:
-    image: caddy:2
+      POSTGRES_DB: keycloak
+      POSTGRES_USER: bn_keycloak
+      POSTGRES_PASSWORD: bitnami_keycloak
     volumes:
-      - ${FZ_INSTALL_DIR:-.}/caddy:/data/caddy
-    ports:
-      - 80:80
-      - 443:443
-    # See Caddy's documentation for customizing the Caddyfile
-    # https://caddyserver.com/docs/quick-starts/reverse-proxy
-    command:
-      - /bin/sh
-      - -c
-      - |
-        cat <<EOF > /etc/caddy/Caddyfile && caddy run --config /etc/caddy/Caddyfile
+      - 'keycloak_db_data:/bitnami/postgresql'
+    networks:
+      - firezone-network
 
-        https:// {
-          log
-          reverse_proxy * 172.25.0.100:${PHOENIX_PORT:-13000}
-          ${TLS_OPTS:-}
-        }
-        EOF
-    deploy:
-      <<: *default-deploy
+  keycloak:
+    image: bitnami/keycloak:20.0.5-debian-11-r9
+    restart: "no"
+    ports:
+      - 9090:9090
+    environment:
+      KEYCLOAK_CREATE_ADMIN_USER: true
+      KEYCLOAK_ADMIN_USER: lfadmin
+      KEYCLOAK_ADMIN_PASSWORD: "123"
+      KEYCLOAK_DATABASE_HOST: keycloak-db
+      KEYCLOAK_DATABASE_NAME: keycloak
+      KEYCLOAK_DATABASE_USER: bn_keycloak
+      KEYCLOAK_DATABASE_PASSWORD: bitnami_keycloak
+      POSTGRES_PASSWORD: bitnami_keycloak
+      KEYCLOAK_HTTP_PORT: 9090
+    depends_on:
+      - keycloak-db
+    networks:
+      - firezone-network
+  
+  # openldap:
+  #   image: bitnami/openldap:2.5.14-debian-11-r9
+  #   ports:
+  #     - '1389:1389'
+  #     # - '1636:1636'
+  #   environment:
+  #     - LDAP_ADMIN_USERNAME=admin
+  #     - LDAP_ADMIN_PASSWORD=adminpassword
+  #     - LDAP_USERS=u1@lf.test,u2@lf.test
+  #     - LDAP_PASSWORDS=p1,p2
+  #   networks:
+  #     - firezone-network
+  #   volumes
+  #     - 'openldap_data:/bitnami/openldap'
+  
+  openid:
+    image: "dexidp/dex:v2.36.0-alpine"
+    restart: "always"
+    networks:
+      - firezone-network
+    ports:
+    - 5556:5556
+    environment:
+    - DEX_OAUTH2_ALWAYS_SHOW_LOGIN_SCREEN=true
+    volumes:
+    - ${FZ_INSTALL_DIR:-.}/dex.conf:/etc/dex/config.docker.yaml
+    - ${FZ_INSTALL_DIR:-.}/dex:/var/dex
+    depends_on:
+    - dex-db
+    - keycloak
+    # - openldap
+
+  dex-db:
+    image: postgres:15.2-alpine3.17
+    restart: "always"
+    volumes:
+      - dex-postgres-data:/var/lib/postgresql/data
+    environment:
+      POSTGRES_DB: dex
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+    networks:
+      - firezone-network
 
   firezone:
     image: firezone/firezone:${VERSION:-latest}
@@ -74,17 +124,28 @@ services:
       - net.ipv6.conf.all.forwarding=1
     depends_on:
       - postgres
+      # - openid
+    ports:
+    # admin portal
+    - 13000:13000
+    networks:
+      firezone-network:
+        # ipv4_address: 172.25.0.100
+        # ipv6_address: 2001:3990:3990::99
+
     deploy:
       <<: *default-deploy
 
   postgres:
-    image: postgres:15
+    image: postgres:15.2-alpine3.17
     volumes:
       - postgres-data:/var/lib/postgresql/data
     environment:
       POSTGRES_DB: ${DATABASE_NAME:-firezone}
       POSTGRES_USER: ${DATABASE_USER:-postgres}
       POSTGRES_PASSWORD: ${DATABASE_PASSWORD:?err}
+    networks:
+      - firezone-network
     deploy:
       <<: *default-deploy
       update_config:
@@ -93,3 +154,16 @@ services:
 # Postgres needs a named volume to prevent perms issues on non-linux platforms
 volumes:
   postgres-data:
+  dex-postgres-data:
+  keycloak_db_data:
+
+networks:
+  firezone-network:
+    enable_ipv6: true
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 172.25.0.0/16
+        - subnet: 2001:3990:3990::/64
+          gateway: 2001:3990:3990::1
+          
